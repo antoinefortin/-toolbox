@@ -1,0 +1,123 @@
+#!/bin/bash
+###############################################################################
+#  cpp-asm-watch — Auto-generate & display clean assembly on save
+#  Watches .cpp/.h files, regenerates Intel syntax assembly
+#  AGGRESSIVELY filters noise — only shows instructions & labels
+###############################################################################
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+CYAN='\033[0;36m'; BLUE='\033[0;34m'; MAGENTA='\033[0;35m'
+DIM='\033[2m'; BOLD='\033[1m'; NC='\033[0m'
+
+DIR="${1:-.}"
+cd "$DIR" || exit 1
+
+# ── Generate and display assembly ───────────────────────────────
+show_asm() {
+    clear
+    echo -e "${CYAN}${BOLD}  asm-view${NC}${DIM}  $(basename "$(pwd)") │ $(date +%H:%M:%S)${NC}"
+    echo -e "${DIM}  Intel syntax │ save to refresh${NC}"
+    echo -e "${DIM}──────────────────────────────────────────────────${NC}"
+    echo ""
+
+    # Generate assembly: NO debug info (-g removed), Intel syntax, minimal noise
+    local asm_output
+    asm_output=$(g++ -std=c++17 -O0 -S -masm=intel \
+        -fno-asynchronous-unwind-tables \
+        -fno-exceptions \
+        -fno-rtti \
+        -fno-dwarf2-cfi-asm \
+        -o /dev/stdout \
+        *.cpp 2>&1)
+
+    local exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        echo -e "${RED}${BOLD}  ✗ Compilation failed${NC}"
+        echo ""
+        echo "$asm_output"
+        return
+    fi
+
+    # AGGRESSIVE filter: only keep instructions and labels
+    echo "$asm_output" | while IFS= read -r line; do
+        # Skip ALL directives (lines starting with .)
+        [[ "$line" =~ ^[[:space:]]*\. ]] && continue
+
+        # Skip empty lines
+        [[ -z "${line// }" ]] && continue
+
+        # Skip comments only
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+
+        # Labels (no leading whitespace, ends with :)
+        if [[ "$line" =~ ^[^[:space:]].*: ]]; then
+            # Skip internal labels like .LBB0_1, .Lfunc_end, .LASF etc
+            [[ "$line" =~ ^\. ]] && continue
+            echo -e "${GREEN}${BOLD}${line}${NC}"
+            continue
+        fi
+
+        # Instructions (leading whitespace = actual asm)
+        if [[ "$line" =~ ^[[:space:]]+ ]]; then
+            local colored="$line"
+
+            # Color jumps/calls RED
+            if [[ "$line" =~ ^[[:space:]]*(call|jmp|je|jne|jg|jge|jl|jle|ja|jae|jb|jbe|jz|jnz|ret) ]]; then
+                echo -e "${RED}${line}${NC}"
+            # Color mov/lea/push/pop CYAN
+            elif [[ "$line" =~ ^[[:space:]]*(mov|lea|push|pop) ]]; then
+                echo -e "${CYAN}${line}${NC}"
+            # Color arithmetic MAGENTA
+            elif [[ "$line" =~ ^[[:space:]]*(add|sub|imul|mul|div|idiv|inc|dec|neg|not|and|or|xor|shl|shr|sar|cmp|test) ]]; then
+                echo -e "${MAGENTA}${line}${NC}"
+            # Color nop DIM
+            elif [[ "$line" =~ ^[[:space:]]*nop ]]; then
+                echo -e "${DIM}${line}${NC}"
+            else
+                echo "$line"
+            fi
+            continue
+        fi
+
+        # Anything else that made it through
+        echo "$line"
+    done
+
+    echo ""
+    echo -e "${DIM}──────────────────────────────────────────────────${NC}"
+    local instr_count
+    instr_count=$(echo "$asm_output" | grep -cE '^[[:space:]]+(mov|push|pop|call|jmp|j[a-z]+|add|sub|lea|cmp|test|ret|xor|and|or|nop|inc|dec|mul|div|shl|shr)' || echo 0)
+    echo -e "${DIM}  ~${instr_count} instructions${NC}"
+}
+
+# ── Main ────────────────────────────────────────────────────────
+show_asm
+
+# ── Watch loop ──────────────────────────────────────────────────
+if command -v inotifywait &>/dev/null; then
+    while true; do
+        inotifywait -qq -e close_write -e moved_to \
+            --include '\.(cpp|cc|cxx|h|hpp)$' \
+            . 2>/dev/null
+        sleep 0.2
+        show_asm
+    done
+else
+    echo -e "${YELLOW}  inotify-tools not found — using polling${NC}"
+
+    get_hash() {
+        find . -maxdepth 2 \( -name '*.cpp' -o -name '*.h' -o -name '*.hpp' \) 2>/dev/null \
+            | sort | xargs md5sum 2>/dev/null
+    }
+
+    last_hash=$(get_hash)
+    while true; do
+        sleep 1
+        current_hash=$(get_hash)
+        if [[ "$current_hash" != "$last_hash" ]]; then
+            last_hash="$current_hash"
+            show_asm
+        fi
+    done
+fi

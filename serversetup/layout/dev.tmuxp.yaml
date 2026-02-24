@@ -1,0 +1,12 @@
+session_name: dev
+start_directory:  /home/debian
+windows:
+  - window_name: editor
+    layout: main-horizontal
+    panes:
+      - nvim
+      - bash
+  - window_name: logs
+    panes:
+      - shell_command:
+          - tail -f /var/log/syslog
