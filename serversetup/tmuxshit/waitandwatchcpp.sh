@@ -1,0 +1,116 @@
+#!/bin/bash
+###############################################################################
+#  cpp-watch — Auto-compile & run C++ on file save
+#  Uses inotifywait to detect .cpp/.h changes
+#  Falls back to polling if inotify not available
+###############################################################################
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+CYAN='\033[0;36m'; DIM='\033[2m'; BOLD='\033[1m'; NC='\033[0m'
+
+DIR="${1:-.}"
+cd "$DIR" || exit 1
+
+clear
+echo -e "${CYAN}${BOLD}  cpp-watch${NC}${DIM}  watching $(pwd)${NC}"
+echo -e "${DIM}  Save a .cpp or .h file to auto-compile & run${NC}"
+echo -e "${DIM}  Ctrl-C to stop${NC}"
+echo ""
+
+# ── Compile & run function ──────────────────────────────────────
+build_and_run() {
+    echo -e "${DIM}──────────────────────────────────────────────────${NC}"
+    echo -e "${CYAN}$(date +%H:%M:%S)${NC} Change detected — building..."
+    echo ""
+
+    # Try Makefile first, fallback to direct g++
+    if [[ -f Makefile ]]; then
+        if make 2>&1; then
+            echo ""
+            echo -e "${GREEN}${BOLD}  ✓ Build OK${NC} — running..."
+            echo -e "${DIM}─── output ──────────────────────────────────────${NC}"
+            echo ""
+
+            # Run with timeout (10s safety)
+            local start=$SECONDS
+            timeout 10 make run 2>&1
+            local exit_code=$?
+            local elapsed=$(( SECONDS - start ))
+
+            echo ""
+            if [[ $exit_code -eq 0 ]]; then
+                echo -e "${GREEN}  ✓ exit: 0${NC} ${DIM}(${elapsed}s)${NC}"
+            elif [[ $exit_code -eq 124 ]]; then
+                echo -e "${YELLOW}  ⏱ killed after 10s timeout${NC}"
+            else
+                echo -e "${RED}  ✗ exit: $exit_code${NC} ${DIM}(${elapsed}s)${NC}"
+            fi
+        else
+            echo ""
+            echo -e "${RED}${BOLD}  ✗ Build FAILED${NC}"
+        fi
+    else
+        # Direct compile: all .cpp → main
+        local src
+        src=$(ls *.cpp 2>/dev/null)
+        if [[ -z "$src" ]]; then
+            echo -e "${RED}  No .cpp files found${NC}"
+            return
+        fi
+
+        if g++ -std=c++17 -Wall -Wextra -o main $src 2>&1; then
+            echo -e "${GREEN}${BOLD}  ✓ Build OK${NC} — running..."
+            echo -e "${DIM}─── output ──────────────────────────────────────${NC}"
+            echo ""
+            timeout 10 ./main 2>&1
+            local exit_code=$?
+            echo ""
+            if [[ $exit_code -eq 0 ]]; then
+                echo -e "${GREEN}  ✓ exit: 0${NC}"
+            else
+                echo -e "${RED}  ✗ exit: $exit_code${NC}"
+            fi
+        else
+            echo ""
+            echo -e "${RED}${BOLD}  ✗ Build FAILED${NC}"
+        fi
+    fi
+
+    echo -e "${DIM}──────────────────────────────────────────────────${NC}"
+    echo ""
+}
+
+# ── Initial build ───────────────────────────────────────────────
+build_and_run
+
+# ── Watch loop ──────────────────────────────────────────────────
+if command -v inotifywait &>/dev/null; then
+    # Fast: inotifywait
+    while true; do
+        inotifywait -qq -e close_write -e moved_to \
+            --include '\.(cpp|cc|cxx|h|hpp)$' \
+            . 2>/dev/null
+        sleep 0.2  # debounce
+        build_and_run
+    done
+else
+    # Fallback: polling with checksums
+    echo -e "${YELLOW}  inotify-tools not found — using polling (install for faster response)${NC}"
+    echo -e "${DIM}  sudo apt install inotify-tools${NC}"
+    echo ""
+
+    get_hash() {
+        find . -maxdepth 2 -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name '*.cc' 2>/dev/null \
+            | sort | xargs md5sum 2>/dev/null
+    }
+
+    last_hash=$(get_hash)
+    while true; do
+        sleep 1
+        current_hash=$(get_hash)
+        if [[ "$current_hash" != "$last_hash" ]]; then
+            last_hash="$current_hash"
+            build_and_run
+        fi
+    done
+fi
